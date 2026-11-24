@@ -7,6 +7,7 @@
 #   curl -fSsLO https://raw.githubusercontent.com/vvcik/sh/main/mieru-install.sh && sudo bash mieru-install.sh
 #   sudo bash mieru-install.sh install   # 跳过菜单，直接安装（交互式提问）
 #   sudo bash mieru-install.sh install --port 2012 --user mieru --password 你的密码   # 一键安装，全程无确认
+#   sudo bash mieru-install.sh 2012 xx yy   # 位置参数直装：端口 用户名 密码，全程无确认
 # 安装后 root 可直接运行 mieru 打开管理菜单，也支持：mieru install --port 2012 --user xxx --password yyy
 #
 # 菜单式管理：安装 / 卸载 / 启动 / 停止 / 重启 / 修改配置 / 查看配置 / 查看状态 / 开启 BBR
@@ -143,6 +144,7 @@ ARG_PORT=""; ARG_USER=""; ARG_PASS=""; NONINTERACTIVE=0
 
 usage_install() {
     echo "用法：bash mieru-install.sh install [--port 端口] [--user 用户名] [--password 密码]"
+    echo "   或：bash mieru-install.sh <端口> <用户名> <密码>"
     echo "  --port      监听端口，1025-65535，默认 2012"
     echo "  --user      用户名，默认 mieru"
     echo "  --password  密码，不给则自动生成 16 位随机密码（只显示一次）"
@@ -165,7 +167,15 @@ parse_install_args() {
                 ARG_PASS="$2"; shift 2 ;;
             --password=*) ARG_PASS="${1#--password=}"; shift ;;
             -h|--help) usage_install; exit 0 ;;
-            *) error "未知参数：$1"; usage_install; exit 1 ;;
+            -*)
+                error "未知参数：$1"; usage_install; exit 1 ;;
+            *)
+                # 位置参数：依次对应 端口 用户名 密码
+                if [[ -z "$ARG_PORT" ]]; then ARG_PORT="$1";
+                elif [[ -z "$ARG_USER" ]]; then ARG_USER="$1";
+                elif [[ -z "$ARG_PASS" ]]; then ARG_PASS="$1";
+                else error "多余参数：$1"; usage_install; exit 1; fi
+                shift ;;
         esac
     done
     if [[ -n "$ARG_PORT" || -n "$ARG_USER" || -n "$ARG_PASS" ]]; then
@@ -462,6 +472,12 @@ main() {
     # 直接安装：sudo bash mieru-install.sh install [--port 端口] [--user 用户名] [--password 密码]
     if [[ "${1:-}" == "install" ]]; then
         shift
+        parse_install_args "$@"
+        do_install
+        exit 0
+    fi
+    # 位置参数直装：bash mieru-install.sh 2012 xx yy（端口 用户名 密码）
+    if [[ "${1:-}" =~ ^[0-9]+$ ]]; then
         parse_install_args "$@"
         do_install
         exit 0
