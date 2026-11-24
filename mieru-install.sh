@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # mieru / mita 一键安装脚本
 # 基于官方文档 v3.40.0
-# https://github.com/enfein/mieru/blob/main/docs/server-install.md
+# https://github.com/vvcik/mieru/blob/main/docs/server-install.md
 #
 # 用法：
 #   curl -fSsLO https://raw.githubusercontent.com/vvcik/sh/main/mieru-install.sh && sudo bash mieru-install.sh
@@ -11,9 +11,12 @@
 set -euo pipefail
 
 VERSION="3.40.0"
+# 安装包从上游 Release 下载：fork 里没有 Release（0 个），改过去会 404
 REPO="enfein/mieru"
+FORK_REPO="vvcik/mieru"
 RELEASE_BASE="https://github.com/${REPO}/releases/download/v${VERSION}"
-RAW_BASE="https://raw.githubusercontent.com/${REPO}/main"
+# BBR 脚本等仓库文件走你的 fork
+RAW_BASE="https://raw.githubusercontent.com/${FORK_REPO}/main"
 CONF_DIR="/opt/mieru"
 CONF_FILE="${CONF_DIR}/server_config.json"
 
