@@ -5,7 +5,9 @@
 #
 # 用法：
 #   curl -fSsLO https://raw.githubusercontent.com/vvcik/sh/main/mieru-install.sh && sudo bash mieru-install.sh
-#   sudo bash mieru-install.sh install   # 跳过菜单，直接安装
+#   sudo bash mieru-install.sh install   # 跳过菜单，直接安装（交互式提问）
+#   sudo bash mieru-install.sh install --port 2012 --user mieru --password 你的密码   # 一键安装，全程无确认
+# 安装后 root 可直接运行 mieru 打开管理菜单，也支持：mieru install --port 2012 --user xxx --password yyy
 #
 # 菜单式管理：安装 / 卸载 / 启动 / 停止 / 重启 / 修改配置 / 查看配置 / 查看状态 / 开启 BBR
 set -euo pipefail
@@ -19,6 +21,27 @@ RELEASE_BASE="https://github.com/${REPO}/releases/download/v${VERSION}"
 RAW_BASE="https://raw.githubusercontent.com/${FORK_REPO}/main"
 CONF_DIR="/opt/mieru"
 CONF_FILE="${CONF_DIR}/server_config.json"
+CLI_PATH="/usr/local/bin/mieru"
+SCRIPT_URL="https://raw.githubusercontent.com/vvcik/sh/main/mieru-install.sh"
+
+self_path() { readlink -f "$0" 2>/dev/null || echo "$0"; }
+
+# 把管理脚本装为 mieru 快捷命令
+install_cli() {
+    local src; src="$(self_path)"
+    # 已通过 mieru 命令自身运行：静默返回，避免每次进菜单都重复打印
+    [ "${src}" = "${CLI_PATH}" ] && return 0
+    if [ -f "${src}" ]; then
+        cp -f "${src}" "${CLI_PATH}"
+    else
+        # 进程替换（bash <(curl ...)）等方式运行时 $0 不是文件，从仓库拉取
+        info "从仓库下载管理脚本以安装 mieru 命令..."
+        curl -fsSL --retry 2 -o "${CLI_PATH}" "${SCRIPT_URL}?t=$(date +%s)" \
+            || { warn "mieru 命令安装失败，稍后可手动下载安装"; return; }
+    fi
+    chmod +x "${CLI_PATH}"
+    info "已安装 mieru 命令：root 下直接运行 mieru 即可打开管理菜单"
+}
 
 # ---------- 输出 ----------
 info()  { echo -e "\033[32m[INFO]\033[0m $*"; }
@@ -113,61 +136,117 @@ ensure_ntp() {
     fi
 }
 
+# ---------- 安装参数 ----------
+# install 子命令支持 --port / --user / --password；带任意一个即进入免确认模式，
+# 给出的值直接采用，未给出的用默认值（端口 2012、用户 mieru、密码自动生成）
+ARG_PORT=""; ARG_USER=""; ARG_PASS=""; NONINTERACTIVE=0
+
+usage_install() {
+    echo "用法：bash mieru-install.sh install [--port 端口] [--user 用户名] [--password 密码]"
+    echo "  --port      监听端口，1025-65535，默认 2012"
+    echo "  --user      用户名，默认 mieru"
+    echo "  --password  密码，不给则自动生成 16 位随机密码（只显示一次）"
+    echo "带任意一个参数即免确认安装，未给出的项用默认值。"
+}
+
+parse_install_args() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --port)
+                [[ $# -ge 2 ]] || { error "--port 需要一个值"; usage_install; exit 1; }
+                ARG_PORT="$2"; shift 2 ;;
+            --port=*) ARG_PORT="${1#--port=}"; shift ;;
+            --user)
+                [[ $# -ge 2 ]] || { error "--user 需要一个值"; usage_install; exit 1; }
+                ARG_USER="$2"; shift 2 ;;
+            --user=*) ARG_USER="${1#--user=}"; shift ;;
+            --password)
+                [[ $# -ge 2 ]] || { error "--password 需要一个值"; usage_install; exit 1; }
+                ARG_PASS="$2"; shift 2 ;;
+            --password=*) ARG_PASS="${1#--password=}"; shift ;;
+            -h|--help) usage_install; exit 0 ;;
+            *) error "未知参数：$1"; usage_install; exit 1 ;;
+        esac
+    done
+    if [[ -n "$ARG_PORT" || -n "$ARG_USER" || -n "$ARG_PASS" ]]; then
+        NONINTERACTIVE=1
+    fi
+}
+
 # ---------- 生成配置文件 ----------
 gen_config() {
     local port protocol user pass dns_choice dns mtu hosts_input hosts_json
     local esc_user esc_pass esc_dns
 
-    read -rp "监听端口 [默认 2012，范围 1025-65535]: " port
-    port="${port:-2012}"
-    if ! [[ "$port" =~ ^[0-9]+$ ]] || (( port < 1025 || port > 65535 )); then
-        error "端口须为 1025-65535 之间的数字"
-        return 1
+    if [[ "$NONINTERACTIVE" -eq 1 ]]; then
+        # 免确认模式：参数给出的直接采用，未给出的用默认值
+        port="${ARG_PORT:-2012}"
+        if ! [[ "$port" =~ ^[0-9]+$ ]] || (( port < 1025 || port > 65535 )); then
+            error "端口须为 1025-65535 之间的数字"
+            return 1
+        fi
+        protocol="TCP"
+        user="${ARG_USER:-mieru}"
+        pass="$ARG_PASS"
+        if [[ -z "$pass" ]]; then
+            pass="$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c 16)"
+            warn "已自动生成密码：$pass（只显示一次，请记好）"
+        fi
+        dns="PREFER_IPv4"
+        mtu=1400
+        hosts_input=""
+    else
+        read -rp "监听端口 [默认 2012，范围 1025-65535]: " port
+        port="${port:-2012}"
+        if ! [[ "$port" =~ ^[0-9]+$ ]] || (( port < 1025 || port > 65535 )); then
+            error "端口须为 1025-65535 之间的数字"
+            return 1
+        fi
+
+        read -rp "协议 TCP/UDP [默认 TCP]: " protocol
+        protocol="${protocol:-TCP}"
+        protocol="${protocol^^}"
+        if [[ "$protocol" != "TCP" && "$protocol" != "UDP" ]]; then
+            error "协议只能是 TCP 或 UDP"
+            return 1
+        fi
+
+        read -rp "用户名 [默认 mieru]: " user
+        user="${user:-mieru}"
+
+        read -rsp "密码（留空自动生成 16 位随机密码）: " pass
+        echo
+        if [[ -z "$pass" ]]; then
+            pass="$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c 16)"
+            warn "已自动生成密码：$pass（只显示一次，请记好）"
+        fi
+
+        echo "DNS 策略（服务端解析域名时用哪个 IP）："
+        echo "  1 USE_FIRST_IP（默认：用 DNS 返回的第一个 IP）"
+        echo "  2 PREFER_IPv4（优先 IPv4，失败再用 IPv6，官方推荐）"
+        echo "  3 PREFER_IPv6（优先 IPv6，失败再用 IPv4）"
+        echo "  4 ONLY_IPv4（只用 IPv4，没有就失败）"
+        echo "  5 ONLY_IPv6（只用 IPv6，没有就失败）"
+        read -rp "选择 [默认 2]: " dns_choice
+        dns_choice="${dns_choice:-2}"
+        case "$dns_choice" in
+            1) dns="USE_FIRST_IP" ;;
+            2) dns="PREFER_IPv4" ;;
+            3) dns="PREFER_IPv6" ;;
+            4) dns="ONLY_IPv4" ;;
+            5) dns="ONLY_IPv6" ;;
+            *) dns="PREFER_IPv4" ;;
+        esac
+
+        read -rp "MTU [默认 1400，最小 1280]: " mtu
+        mtu="${mtu:-1400}"
+        if ! [[ "$mtu" =~ ^[0-9]+$ ]] || (( mtu < 1280 )); then
+            error "MTU 须为不小于 1280 的数字"
+            return 1
+        fi
+
+        read -rp "静态 hosts 映射（可选，格式 域名=IP，多个用逗号分隔，留空跳过）: " hosts_input
     fi
-
-    read -rp "协议 TCP/UDP [默认 TCP]: " protocol
-    protocol="${protocol:-TCP}"
-    protocol="${protocol^^}"
-    if [[ "$protocol" != "TCP" && "$protocol" != "UDP" ]]; then
-        error "协议只能是 TCP 或 UDP"
-        return 1
-    fi
-
-    read -rp "用户名 [默认 mieru]: " user
-    user="${user:-mieru}"
-
-    read -rsp "密码（留空自动生成 16 位随机密码）: " pass
-    echo
-    if [[ -z "$pass" ]]; then
-        pass="$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c 16)"
-        warn "已自动生成密码：$pass（只显示一次，请记好）"
-    fi
-
-    echo "DNS 策略（服务端解析域名时用哪个 IP）："
-    echo "  1 USE_FIRST_IP（默认：用 DNS 返回的第一个 IP）"
-    echo "  2 PREFER_IPv4（优先 IPv4，失败再用 IPv6，官方推荐）"
-    echo "  3 PREFER_IPv6（优先 IPv6，失败再用 IPv4）"
-    echo "  4 ONLY_IPv4（只用 IPv4，没有就失败）"
-    echo "  5 ONLY_IPv6（只用 IPv6，没有就失败）"
-    read -rp "选择 [默认 2]: " dns_choice
-    dns_choice="${dns_choice:-2}"
-    case "$dns_choice" in
-        1) dns="USE_FIRST_IP" ;;
-        2) dns="PREFER_IPv4" ;;
-        3) dns="PREFER_IPv6" ;;
-        4) dns="ONLY_IPv4" ;;
-        5) dns="ONLY_IPv6" ;;
-        *) dns="PREFER_IPv4" ;;
-    esac
-
-    read -rp "MTU [默认 1400，最小 1280]: " mtu
-    mtu="${mtu:-1400}"
-    if ! [[ "$mtu" =~ ^[0-9]+$ ]] || (( mtu < 1280 )); then
-        error "MTU 须为不小于 1280 的数字"
-        return 1
-    fi
-
-    read -rp "静态 hosts 映射（可选，格式 域名=IP，多个用逗号分隔，留空跳过）: " hosts_input
 
     esc_user="$(json_escape "$user")"
     esc_pass="$(json_escape "$pass")"
@@ -303,7 +382,13 @@ do_uninstall() {
         rpm -e mita 2>/dev/null || true
     fi
     rm -rf "$CONF_DIR"
-    info "已卸载"
+    # 同时删除 mieru 快捷命令
+    rm -f "${CLI_PATH}" 2>/dev/null || true
+    info "已卸载（含 mieru 快捷命令）"
+    if [ "$(self_path)" = "${CLI_PATH}" ]; then
+        info "当前会话结束"
+        exit 0
+    fi
 }
 
 # ---------- 服务控制 ----------
@@ -374,8 +459,10 @@ show_menu() {
 }
 
 main() {
-    # 直接安装：sudo bash install.sh install
+    # 直接安装：sudo bash mieru-install.sh install [--port 端口] [--user 用户名] [--password 密码]
     if [[ "${1:-}" == "install" ]]; then
+        shift
+        parse_install_args "$@"
         do_install
         exit 0
     fi
@@ -402,5 +489,11 @@ main() {
 }
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    # 跑一次脚本即装好 mieru 命令：即使不安装服务端，之后 root 下直接敲 mieru 也能进菜单
+    if [[ "$(id -u)" -eq 0 ]]; then
+        install_cli || true
+    else
+        warn "当前非 root，跳过 mieru 命令安装（请用 root 运行一次脚本以安装）"
+    fi
     main "$@"
 fi
