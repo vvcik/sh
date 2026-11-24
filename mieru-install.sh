@@ -383,18 +383,26 @@ do_install() {
 do_uninstall() {
     require_root
     local c
-    read -rp "确认卸载 mita 服务端与配置文件？[y/N]: " c
+    read -rp "确认完全卸载 mita（含残留清理）？[y/N]: " c
     [[ "${c,,}" != "y" ]] && { info "已取消"; return 0; }
     mita stop 2>/dev/null || true
+    systemctl stop mita 2>/dev/null || true
+    systemctl disable mita 2>/dev/null || true
     if [[ "$(detect_os)" == "deb" ]]; then
-        dpkg -r mita 2>/dev/null || apt-get remove -y mita 2>/dev/null || true
+        dpkg --purge mita 2>/dev/null || dpkg -r mita 2>/dev/null || apt-get purge -y mita 2>/dev/null || true
     else
         rpm -e mita 2>/dev/null || true
     fi
+    # 手动安装 / 旧版本留下的残留：二进制、服务文件、失败的服务状态
+    rm -f /usr/bin/mita /usr/local/bin/mita 2>/dev/null || true
+    rm -f /etc/systemd/system/mita.service /lib/systemd/system/mita.service /usr/lib/systemd/system/mita.service 2>/dev/null || true
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl reset-failed mita 2>/dev/null || true
     rm -rf "$CONF_DIR"
+    groupdel mita 2>/dev/null || true
     # 同时删除 mieru 快捷命令
     rm -f "${CLI_PATH}" 2>/dev/null || true
-    info "已卸载（含 mieru 快捷命令）"
+    info "已完全卸载（含残留清理与 mieru 快捷命令）"
     if [ "$(self_path)" = "${CLI_PATH}" ]; then
         info "当前会话结束"
         exit 0
@@ -456,7 +464,7 @@ show_menu() {
     echo "状态：$(current_status)"
     echo "----------------------------------------"
     echo "1 安装 mita"
-    echo "2 卸载 mita"
+    echo "2 卸载 mita（完全清理）"
     echo "3 启动"
     echo "4 停止"
     echo "5 重启"
